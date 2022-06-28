@@ -23,6 +23,62 @@ use sp_std::prelude::*;
 use sp_version::NativeVersion;
 use sp_version::RuntimeVersion;
 
+use frame_support::traits::Nothing;
+use pallet_contracts::weights::WeightInfo;
+
+pub const MILLICENTS: Balance = 1_000_000_000;
+pub const CENTS: Balance = 1_000 * MILLICENTS;
+pub const DOLLARS: Balance = 100 * CENTS;
+
+const fn deposit(items: u32, bytes: u32) -> Balance {
+	items as Balance * 15 * CENTS + (bytes as Balance) * 6 * CENTS
+}
+
+/// Assume ~10% of the block weight is consumed by `on_initialize` handlers.
+/// This is used to limit the maximal weight of a single extrinsic.
+const AVERAGE_ON_INITIALIZE_RATIO: Perbill = Perbill::from_percent(10);
+
+parameter_types! {
+   pub const DepositPerStorageByte: Balance = deposit(0, 1);
+   pub const DepositPerStorageItem: Balance = deposit(1, 0);
+   // The lazy deletion runs inside on_initialize.
+   pub DeletionWeightLimit: Weight = AVERAGE_ON_INITIALIZE_RATIO *
+	BlockWeights::get().max_block;
+   // The weight needed for decoding the queue should be less or equal than a fifth
+   // of the overall weight dedicated to the lazy deletion.
+   pub DeletionQueueDepth: u32 = ((DeletionWeightLimit::get() / (
+		   <Runtime as pallet_contracts::Config>::WeightInfo::on_initialize_per_queue_item(1) -
+		   <Runtime as pallet_contracts::Config>::WeightInfo::on_initialize_per_queue_item(0)
+	)) / 5) as u32;
+
+   pub Schedule: pallet_contracts::Schedule<Runtime> = Default::default();
+}
+
+impl pallet_contracts::Config for Runtime {
+	type Time = Timestamp;
+	type Randomness = RandomnessCollectiveFlip;
+	type Currency = Balances;
+	type Event = Event;
+	type DepositPerByte = DepositPerStorageByte;
+	type DepositPerItem = DepositPerStorageItem;
+	type WeightPrice = pallet_transaction_payment::Pallet<Self>;
+	type WeightInfo = pallet_contracts::weights::SubstrateWeight<Self>;
+	type ChainExtension = ();
+	type DeletionQueueDepth = DeletionQueueDepth;
+	type DeletionWeightLimit = DeletionWeightLimit;
+	type Call = Call;
+	type AddressGenerator = pallet_contracts::DefaultAddressGenerator;
+	/// The safest default is to allow no calls at all.
+	///
+	/// Runtimes should whitelist dispatchables that are allowed to be called from contracts
+	/// and make sure they are stable. Dispatchables exposed to contracts are not allowed to
+	/// change because that would break already deployed contracts. The `Call` structure itself
+	/// is not allowed to change the indices of existing pallets, too.
+	type CallFilter = Nothing;
+	type Schedule = Schedule;
+	type CallStack = [pallet_contracts::Frame<Self>; 31];
+}
+
 // A few exports that help ease life for downstream crates.
 pub use frame_support::{
 	construct_runtime, parameter_types,
@@ -288,6 +344,7 @@ construct_runtime!(
 		Sudo: pallet_sudo,
 		// Include the custom logic from the pallet-template in the runtime.
 		TemplateModule: pallet_template,
+		Contracts: pallet_contracts::{Pallet, Call, Storage, Event<T>},
 	}
 );
 
@@ -335,6 +392,48 @@ mod benches {
 }
 
 impl_runtime_apis! {
+	impl pallet_contracts_rpc_runtime_api::ContractsApi<Block, AccountId, Balance, BlockNumber, Hash> for Runtime {
+	fn call(
+		 origin: AccountId,
+		 dest: AccountId,
+		 value: Balance,
+		 gas_limit: u64,
+		 storage_deposit_limit: Option<Balance>,
+		 input_data: Vec<u8>,
+  ) -> pallet_contracts_primitives::ContractExecResult<Balance> {
+		 let debug = true;
+		 Contracts::bare_call(origin, dest, value, gas_limit, storage_deposit_limit, input_data, debug)
+	}
+
+	 fn instantiate(
+		 origin: AccountId,
+		 endowment: Balance,
+		 gas_limit: u64,
+		 storage_deposit_limit: Option<Balance>,
+		 code: pallet_contracts_primitives::Code<Hash>,
+		 data: Vec<u8>,
+		 salt: Vec<u8>,
+  ) -> pallet_contracts_primitives::ContractInstantiateResult<AccountId, Balance> {
+		 let debug = true;
+		 Contracts::bare_instantiate(origin, endowment, gas_limit, storage_deposit_limit, code, data, salt, debug)
+  }
+
+  fn get_storage(
+		 address: AccountId,
+		 key: [u8; 32],
+  ) -> pallet_contracts_primitives::GetStorageResult {
+		 Contracts::get_storage(address, key)
+  }
+
+  fn upload_code(
+		origin: AccountId,
+		code: Vec<u8>,
+		storage_deposit_limit: Option<Balance>,
+	) -> pallet_contracts_primitives::CodeUploadResult<Hash, Balance> {
+		Contracts::bare_upload_code(origin, code, storage_deposit_limit)
+	}
+ }
+
 	impl sp_api::Core<Block> for Runtime {
 		fn version() -> RuntimeVersion {
 			VERSION
